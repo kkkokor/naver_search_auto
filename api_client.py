@@ -85,7 +85,7 @@ class APIClient:
             "X-Signature": signature
         }
 
-    # [수정] 에러 발생 시 상세 정보를 반환하도록 개선 (키워드 탭에서 사용)
+    # [수정] 에러 발생 시 상세 정보를 반환하도록 개선
     def call_naver(self, uri: str, method: str = "GET", params: Dict = None, body: Any = None):
         if not self.naver_api_key: return None
         clean_uri = uri.split('?')[0]
@@ -103,9 +103,9 @@ class APIClient:
                 return resp.json()
             else:
                 self.log("NAVER_ERR", f"실패({resp.status_code}): {resp.text}")
-                # 에러 핸들링을 위해 에러 객체 반환
                 try:
                     err_json = resp.json()
+                    # 에러 코드와 메시지를 포함한 딕셔너리 반환
                     return {"error": True, "code": err_json.get('code', resp.status_code), "data": err_json}
                 except:
                     return {"error": True, "code": resp.status_code, "data": resp.text}
@@ -196,14 +196,14 @@ class APIClient:
     def get_biz_channels(self):
         return self.call_naver("/ncc/channels") or []
 
-    # [수정] adgroupType 파라미터 추가 (기존엔 없어서 3734 에러 유발 가능성 있었음)
+    # [수정] adgroupType 파라미터 추가 (필수)
     def create_adgroup(self, campaign_id, name, pc_cid, mo_cid, adgroup_type="WEB_SITE"):
         body = {
             "nccCampaignId": campaign_id,
             "name": name,
             "pcChannelId": pc_cid,
             "mobileChannelId": mo_cid,
-            "adgroupType": adgroup_type # <--- 핵심 추가
+            "adgroupType": adgroup_type 
         }
         return self.call_naver("/ncc/adgroups", method="POST", body=body)
 

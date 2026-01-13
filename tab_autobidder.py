@@ -20,38 +20,32 @@ class CampaignLoader(QThread):
     
     def run(self):
         try:
-            # 1. 캠페인 목록 조회
+            # 1. 캠페인 조회
             camps = api.get_campaigns()
             if not camps:
                 self.data_signal.emit([])
                 return
 
             result_tree = []
-            
-            # 2. 순차적으로 그룹 조회 (API 부하 조절)
+            # 2. 순차적으로 하나씩 조회 (병렬 처리 제거)
             for c in camps:
                 camp_data = {
                     'id': c['nccCampaignId'],
                     'name': c['name'],
                     'groups': []
                 }
-                
-                # 그룹 조회
                 groups = api.get_adgroups(c['nccCampaignId'])
                 for g in groups:
                     camp_data['groups'].append({
                         'id': g['nccAdgroupId'],
                         'name': g['name']
                     })
-                
                 result_tree.append(camp_data)
-                # API 호출 간격 조절 (안전장치)
-                time.sleep(0.1) 
+                # [중요] 0.2초 대기
+                time.sleep(0.2)
             
             self.data_signal.emit(result_tree)
-            
-        except Exception as e:
-            print(f"Loader Error: {e}")
+        except Exception:
             self.data_signal.emit([])
 
 # -------------------------------------------------------------------------
@@ -149,13 +143,13 @@ class BidWorker(QThread):
 
         self.finished_signal.emit()
 
+    # [수정] BidWorker의 flush_updates 메서드 수정 (대기 시간 증가)
     def flush_updates(self, updates, logs):
         if not updates: return
         
-        self.status_signal.emit(f"{len(updates)}개 키워드 입찰가 수정 중...")
+        self.status_signal.emit(f"{len(updates)}개 키워드 수정 중...")
         try:
             res = api.update_keywords_bulk(updates)
-            # res가 에러 딕셔너리가 아니고 리스트면 성공
             if isinstance(res, list):
                 for log in logs:
                     self.log_signal.emit(log)
@@ -164,8 +158,8 @@ class BidWorker(QThread):
         except Exception as e:
             self.status_signal.emit(f"전송 오류: {e}")
             
-        # [핵심] API 호출 제한(1014) 방지를 위한 강제 휴식
-        time.sleep(1.0) 
+        # [중요] 1014 방지를 위해 전송 후 2초간 휴식
+        time.sleep(2.0)
 
     def calculate_bid(self, cur_bid, cur_rank, imp_cnt, cfg):
         target = cfg['target_rank']

@@ -14,6 +14,7 @@ from api_client import api
 # -------------------------------------------------------------------------
 # [작업 스레드] 스마트 키워드 등록 (워터폴 방식)
 # -------------------------------------------------------------------------
+# [수정] KeywordRegisterWorker 클래스 전체 교체
 class KeywordRegisterWorker(QThread):
     progress_signal = pyqtSignal(int, int) 
     log_signal = pyqtSignal(int, str, str)
@@ -25,136 +26,146 @@ class KeywordRegisterWorker(QThread):
         self.is_running = True
 
     def run(self):
-        total = len(self.task_list)
-        success_cnt = 0
-        fail_cnt = 0
-        
-        grouped_tasks = {}
-        for task in self.task_list:
-            gid = task['group_id']
-            if gid not in grouped_tasks: grouped_tasks[gid] = []
-            grouped_tasks[gid].append(task)
-
-        current_progress = 0
-        
-        for initial_gid, tasks in grouped_tasks.items():
-            if not self.is_running: break
+        try:
+            total = len(self.task_list)
+            success_cnt = 0
+            fail_cnt = 0
             
-            keyword_queue = [t['keyword'] for t in tasks]
-            original_grp_info = api.get_adgroup(initial_gid)
+            # 그룹별로 작업 분류
+            grouped_tasks = {}
+            for task in self.task_list:
+                gid = task['group_id']
+                if gid not in grouped_tasks: grouped_tasks[gid] = []
+                grouped_tasks[gid].append(task)
+
+            current_progress = 0
             
-            if not original_grp_info or 'error' in original_grp_info:
-                self.log_batch(tasks, "실패", "그룹 정보 조회 실패")
-                fail_cnt += len(tasks)
-                current_progress += len(tasks)
-                continue
-
-            current_gid = initial_gid
-            current_grp_name = original_grp_info['name']
-            campaign_id = original_grp_info['nccCampaignId']
-            
-            base_name = re.sub(r'_\d+$', '', current_grp_name)
-            next_group_index = 1
-            if current_grp_name != base_name:
-                try: next_group_index = int(current_grp_name.split('_')[-1]) + 1
-                except: next_group_index = 1
-
-            # [등록 루프]
-            while len(keyword_queue) > 0 and self.is_running:
+            for initial_gid, tasks in grouped_tasks.items():
+                if not self.is_running: break
                 
-                # 1. 용량 체크
-                existing_kwds = api.get_keywords(current_gid)
-                current_count = len(existing_kwds) if isinstance(existing_kwds, list) else 1000
-                capacity = 1000 - current_count
+                keyword_queue = [t['keyword'] for t in tasks]
                 
-                # 2. 중복 제거
-                if isinstance(existing_kwds, list):
-                    exist_set = {k['keyword'].replace(" ", "").upper() for k in existing_kwds}
-                    keyword_queue = [k for k in keyword_queue if k.replace(" ", "").upper() not in exist_set]
+                # 원본 그룹 정보 조회
+                original_grp_info = api.get_adgroup(initial_gid)
                 
-                if not keyword_queue: break
+                if not original_grp_info or 'error' in original_grp_info:
+                    self.log_batch(tasks, "실패", "그룹 정보 조회 불가")
+                    fail_cnt += len(tasks)
+                    current_progress += len(tasks)
+                    continue
 
-                # 3. 빈 자리 등록
-                if capacity > 0:
-                    chunk = keyword_queue[:capacity]
-                    res = api.create_keywords_bulk(current_gid, chunk)
+                current_gid = initial_gid
+                current_grp_name = original_grp_info['name']
+                campaign_id = original_grp_info['nccCampaignId']
+                
+                base_name = re.sub(r'_\d+$', '', current_grp_name)
+                next_group_index = 1
+                
+                # 번호 파싱
+                if current_grp_name != base_name:
+                    try: next_group_index = int(current_grp_name.split('_')[-1]) + 1
+                    except: next_group_index = 1
+
+                # [등록 루프]
+                while len(keyword_queue) > 0 and self.is_running:
+                    # 1. 용량 확인
+                    existing_kwds = api.get_keywords(current_gid)
+                    # 리스트가 아니면(에러면) 꽉 찬 것으로 간주하여 안전하게 다음 단계로
+                    current_count = len(existing_kwds) if isinstance(existing_kwds, list) else 1000
+                    capacity = 1000 - current_count
                     
-                    if isinstance(res, list):
-                        created_count = len(res)
-                        if created_count > 0:
-                            self.log_batch(tasks[:created_count], "성공", f"{current_grp_name} 등록")
-                            success_cnt += created_count
-                            keyword_queue = keyword_queue[created_count:]
-                            tasks = tasks[created_count:]
-                        else:
-                            # 0건 등록됨 (API 오류 가능성)
-                            pass
-                    else:
-                        time.sleep(0.5) # 오류 시 대기
-
-                # 4. 남은 키워드 -> 다음 그룹 찾기/생성
-                if len(keyword_queue) > 0:
-                    found_next_group = False
+                    # 2. 중복 제거
+                    if isinstance(existing_kwds, list):
+                        exist_set = {k['keyword'].replace(" ", "").upper() for k in existing_kwds}
+                        keyword_queue = [k for k in keyword_queue if k.replace(" ", "").upper() not in exist_set]
                     
-                    while not found_next_group and self.is_running:
-                        next_name = f"{base_name}_{next_group_index}"
-                        self.log_batch(tasks, "확장중", f"{next_name} 확인 중...")
+                    if not keyword_queue: break
+
+                    # 3. 등록 시도
+                    if capacity > 0:
+                        chunk = keyword_queue[:capacity]
+                        res = api.create_keywords_bulk(current_gid, chunk)
                         
-                        # [핵심 변경] 선 조회 -> 후 생성
-                        all_grps = api.get_adgroups(campaign_id)
-                        target = next((g for g in all_grps if g['name'].strip() == next_name.strip()), None)
-                        
-                        if target:
-                            # A. 이미 존재함 -> 타겟 변경
-                            current_gid = target['nccAdgroupId']
-                            current_grp_name = target['name']
-                            found_next_group = True
-                            self.log_batch(tasks, "전환", f"기존 그룹({next_name})으로 전환")
-                        else:
-                            # B. 없음 -> 생성
-                            body = {
-                                "nccCampaignId": campaign_id,
-                                "name": next_name,
-                                "pcChannelId": original_grp_info.get('pcChannelId'),
-                                "mobileChannelId": original_grp_info.get('mobileChannelId'),
-                                "adgroupType": original_grp_info.get('adgroupType', 'WEB_SITE')
-                            }
-                            new_grp = api.call_naver("/ncc/adgroups", method="POST", body=body)
+                        # [검증] 리스트이고, 내용이 있어야 진짜 성공
+                        if isinstance(res, list) and len(res) > 0:
+                            created_cnt = len(res)
+                            self.log_batch(tasks[:created_cnt], "성공", f"{current_grp_name} 등록완료")
+                            success_cnt += created_cnt
                             
-                            if new_grp and 'nccAdgroupId' in new_grp:
-                                current_gid = new_grp['nccAdgroupId']
-                                current_grp_name = next_name
+                            keyword_queue = keyword_queue[created_cnt:]
+                            tasks = tasks[created_cnt:]
+                        else:
+                            # 실패 시 잠시 대기
+                            time.sleep(1.0)
+
+                    # 4. 남은 키워드가 있다면 -> 그룹 확장(워터폴)
+                    if len(keyword_queue) > 0:
+                        found_next_group = False
+                        
+                        while not found_next_group and self.is_running:
+                            next_name = f"{base_name}_{next_group_index}"
+                            self.log_batch(tasks, "확장중", f"{next_name} 확인 중...")
+                            
+                            # [안전] 1014 방지를 위한 대기
+                            time.sleep(1.0) 
+                            
+                            # A. 먼저 조회 (Find)
+                            all_grps = api.get_adgroups(campaign_id)
+                            target = next((g for g in all_grps if g['name'].strip() == next_name.strip()), None)
+                            
+                            if target:
+                                current_gid = target['nccAdgroupId']
+                                current_grp_name = target['name']
                                 found_next_group = True
-                                self.log_batch(tasks, "생성", f"새 그룹({next_name}) 생성됨")
-                                self.clone_assets(initial_gid, current_gid)
+                                self.log_batch(tasks, "전환", f"기존 그룹({next_name}) 발견")
                             else:
-                                # 생성 실패 (혹시 그 사이 생겼을 수도 있으니 다음 번호로)
-                                next_group_index += 1
-                                if next_group_index > 100:
-                                    self.log_batch(tasks, "실패", "그룹 확장 한도 초과")
-                                    fail_cnt += len(keyword_queue)
-                                    keyword_queue = []
-                                    break
-                                time.sleep(1.0) # 1014 방지
+                                # B. 없으면 생성 (Create)
+                                new_grp = api.create_adgroup(
+                                    campaign_id, next_name,
+                                    original_grp_info.get('pcChannelId'),
+                                    original_grp_info.get('mobileChannelId'),
+                                    original_grp_info.get('adgroupType', 'WEB_SITE')
+                                )
+                                
+                                if new_grp and 'nccAdgroupId' in new_grp:
+                                    current_gid = new_grp['nccAdgroupId']
+                                    current_grp_name = next_name
+                                    found_next_group = True
+                                    self.log_batch(tasks, "생성", f"새 그룹({next_name}) 생성됨")
+                                    # 자산 복제
+                                    self.clone_assets(initial_gid, current_gid)
+                                else:
+                                    # 실패 시 다음 번호로
+                                    next_group_index += 1
+                                    if next_group_index > 100:
+                                        self.log_batch(tasks, "실패", "그룹 확장 한도 초과")
+                                        fail_cnt += len(keyword_queue)
+                                        keyword_queue = [] # 종료
+                                        break
+                        
+                        if found_next_group:
+                            next_group_index += 1
+                
+                current_progress += len(tasks) if not keyword_queue else 0
+                self.progress_signal.emit(current_progress, total)
 
-                    if found_next_group:
-                        next_group_index += 1
-                        time.sleep(1.0) # 1014 방지
-
-            current_progress += (len(tasks))
-            self.progress_signal.emit(current_progress, total)
-
-        self.result_signal.emit(success_cnt, fail_cnt)
+            self.result_signal.emit(success_cnt, fail_cnt)
+            
+        except Exception as e:
+            print(f"Worker Error: {e}")
+            self.result_signal.emit(success_cnt, fail_cnt)
 
     def clone_assets(self, src_gid, dst_gid):
         try:
-            time.sleep(0.5) # 안전 딜레이
+            time.sleep(1.0) # 안전 딜레이
+            # 확장소재 복제
             exts = api.get_extensions(src_gid)
             for ext in exts:
                 if ext.get("type") in ["IMAGE_SUB_LINKS", "POWER_LINK_IMAGE"]: continue
                 api.create_extension(dst_gid, ext['type'], ext.get('extension'), ext.get('pcChannelId'))
                 time.sleep(0.2)
-                
+            
+            # 소재 복제
             ads = api.get_ads(src_gid)
             for ad in ads:
                 c = ad['ad']
@@ -163,6 +174,7 @@ class KeywordRegisterWorker(QThread):
         except: pass
 
     def log_batch(self, tasks, status, msg):
+        # 작업이 많이 남았을 때 모든 행을 업데이트하면 UI가 멈출 수 있으므로 첫 번째 행만 업데이트하거나 로그용 
         for t in tasks:
             self.log_signal.emit(t['row'], status, msg)
 
