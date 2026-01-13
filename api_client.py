@@ -135,17 +135,38 @@ class APIClient:
     # [수정] 성공/실패 여부를 리스트/딕셔너리로 명확히 반환
     def create_keywords_bulk(self, adgroup_id, keywords):
         results = []
+        
         for i in range(0, len(keywords), 100):
             chunk = keywords[i:i+100]
-            body = [{"nccAdgroupId": adgroup_id, "keyword": k, "bidAmt": 70} for k in chunk]
+            # [수정] 3916 오류 해결: useGroupBidAmt=False를 명시하여 bidAmt를 직접 사용하도록 함
+            # useGroupBidAmt 필드가 없으면 bidAmt를 보냈음에도 그룹 입찰가를 사용하려고 시도하다가
+            # 그룹 입찰가가 설정되지 않은 경우 오류가 날 수 있음.
+            # 혹은 bidAmt 필드 자체가 무시될 수 있음.
+            body = [{"nccAdgroupId": adgroup_id, "keyword": k, "bidAmt": 70, "useGroupBidAmt": False} for k in chunk]
             
+            # [DEBUG] 요청 바디 출력
+            print(f"[DEBUG_REQ] Group:{adgroup_id} Keywords({len(chunk)}): {chunk}", flush=True)
+
             res = self.call_naver("/ncc/keywords", method="POST", params={"nccAdgroupId": adgroup_id}, body=body)
             
-            if isinstance(res, dict) and res.get('error'):
-                return res # 에러 객체 반환
+            # [DEBUG] 응답 결과 출력
+            print(f"[DEBUG_RES] Type:{type(res)} Body:{str(res)[:500]}...", flush=True)
+
+            if isinstance(res, list):
+                for item in res:
+                    if 'nccKeywordId' in item:
+                        results.append(item)
+                    else:
+                        print(f"[DEBUG_WARN] Item missing ID: {item}", flush=True)
             
-            if res: results.extend(res)
-            time.sleep(0.1)
+            elif isinstance(res, dict) and res.get('error'):
+                print(f"[DEBUG_ERR] API Error: {res}", flush=True)
+                if not results:
+                    return res
+                break
+            
+            time.sleep(0.2)
+            
         return results
 
     def update_bid(self, keyword_id, adgroup_id, bid_amt):
@@ -187,16 +208,27 @@ class APIClient:
 
     def create_extension(self, owner_id, type_str, content_dict, channel_id=None):
         body = {"ownerId": owner_id, "type": type_str}
-        if content_dict: body["adExtension"] = content_dict
+        
+        # [수정] POST 요청 시에는 'adExtension' 필드명을 사용해야 함.
+        # 4014(Missing Content) 에러 해결을 위해, 빈 값({})이라도 무조건 adExtension 필드를 전송함.
+        # PHONE 타입의 경우 만약 {} 전송 시 1010 에러가 난다면, 이는 상위 로직에서 content_dict를 제대로 전달하지 않은 문제임.
+        body["adExtension"] = content_dict if content_dict is not None else {}
+        
         if channel_id:
             body["pcChannelId"] = channel_id
             body["mobileChannelId"] = channel_id
+            
+        # [DEBUG]
+        if type_str == "PHONE":
+            print(f"[DEBUG_EXT_CREATE] PHONE Body: {json.dumps(body, ensure_ascii=False)}", flush=True)
+
+        # [수정] 단일 객체 전송으로 복구 (API가 Array를 받지 않음)
         return self.call_naver("/ncc/ad-extensions", method="POST", body=body)
 
     def get_biz_channels(self):
         return self.call_naver("/ncc/channels") or []
 
-    # [수정] adgroupType 파라미터 추가 (필수)
+    # [수정] adgroupType 파라미터 추가
     def create_adgroup(self, campaign_id, name, pc_cid, mo_cid, adgroup_type="WEB_SITE"):
         body = {
             "nccCampaignId": campaign_id,

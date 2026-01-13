@@ -1,5 +1,7 @@
 import sys
 import json
+import time
+import concurrent.futures
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
     QPushButton, QScrollArea, QFrame, QMessageBox, QGroupBox, 
@@ -109,26 +111,46 @@ class ExtensionGroupCard(QFrame):
         data = self.data['content']
         ext_type = self.data['type']
         
+        # [디버깅] 실제 데이터 구조 확인용
+        # layout.addWidget(QLabel(f"Type: {ext_type}"))
+        # layout.addWidget(QLabel(f"Raw: {str(data)}"))
+
         if self.data.get('businessChannelId'):
             layout.addWidget(QLabel(f"🏢 비즈채널: {self.data.get('channelName') or self.data.get('businessChannelId')}"))
             if ext_type == 'WEBSITE_INFO':
                 layout.addWidget(QLabel(f"🔗 URL: {self.data.get('channelUrl', '-') }"))
+                
+            # [수정] PHONE 타입이라도 실제 phoneNumber는 extension 딕셔너리 안에 있음
+            if ext_type == 'PHONE':
+                ph = data.get('phoneNumber') or "번호 없음 (채널 정보만 있음)"
+                layout.addWidget(QLabel(f"📞 전화번호: {ph}"))
         
         elif ext_type == 'PHONE':
+            # 채널 ID가 없을 수도 있음 (순수 텍스트?) -> PHONE은 채널 필수임
             layout.addWidget(QLabel(f"📞 전화번호: {data.get('phoneNumber', '번호 없음')}"))
             
         elif ext_type == 'SUB_LINKS':
             layout.addWidget(QLabel(f"🔗 서브링크 ({len(data.get('links', []))}개)"))
-            for link in data.get('links', [])[:3]:
-                layout.addWidget(QLabel(f" - {link.get('linkName')}"))
+            for link in data.get('links', [])[:5]:
+                # linkName이 네이버 API 표준임
+                layout.addWidget(QLabel(f" - {link.get('linkName', '제목없음')}: {link.get('subLink', '')}"))
                 
         elif ext_type in ['POWER_LINK_IMAGE', 'IMAGE_SUB_LINKS']:
-            layout.addWidget(QLabel("🖼️ 이미지 확장소재 (미리보기 미지원)"))
-            path = data.get('imagePath') or (data.get('images')[0]['imageUrl'] if data.get('images') else '-')
-            layout.addWidget(QLabel(f"Path: {path}"))
+            layout.addWidget(QLabel("🖼️ 이미지 확장소재"))
+            # 이미지 파일 경로나 URL 표시 시도
+            # API 구조에 따라 'images' 배열 안에 있을 수 있음
+            imgs = data.get('images', [])
+            if imgs:
+                url = imgs[0].get('imageUrl', 'URL 없음')
+                layout.addWidget(QLabel(f"URL: {url}"))
+            else:
+                path = data.get('imagePath', '-')
+                layout.addWidget(QLabel(f"Path: {path}"))
             
         else:
-            lbl = QLabel(str(data))
+            # 기타 타입 (ADDITIONAL_LINK 등)
+            # 일단 전체 덤프해서 보여주기
+            lbl = QLabel(f"Content: {str(data)}")
             lbl.setWordWrap(True)
             layout.addWidget(lbl)
 
@@ -234,30 +256,54 @@ class ExtensionManagerWidget(QWidget):
 
             raw_exts = []
             
-            # 2. [수정됨] 모든 광고그룹 순회하며 확장소재 수집
+            # 2. [수정됨] 멀티스레딩으로 속도 개선 (기존 순차처리 -> 병렬처리)
             total = len(self.all_adgroups)
-            # 캠페인 레벨 확장소재도 포함
+            
+            # 캠페인 레벨 확장소재도 포함 (1회 호출)
             camp_exts = api.get_extensions(camp_id)
             if camp_exts: raw_exts.extend(camp_exts)
             
-            for i, grp in enumerate(self.all_adgroups):
-                # [수정됨] nccAdgroupId (소문자 g)
-                gid = grp['nccAdgroupId'] 
-                exts = api.get_extensions(gid)
-                if exts: raw_exts.extend(exts)
+            # 헬퍼 함수
+            def fetch_ext(grp):
+                # [안전장치] 너무 빠른 동시 호출 방지 (랜덤 딜레이 미세 추가 가능하지만, requests pool이 처리함)
+                # 필요시 time.sleep(0.1) 추가
+                return api.get_extensions(grp['nccAdgroupId'])
+
+            # 병렬 실행 (최대 10개 스레드)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(fetch_ext, grp): grp for grp in self.all_adgroups}
                 
-                # 진행률 업데이트 & UI 프리징 방지
-                self.progress_bar.setValue(int((i+1)/total * 100))
-                QApplication.processEvents()
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    try:
+                        exts = future.result()
+                        if exts: raw_exts.extend(exts)
+                    except Exception as e:
+                        print(f"Extension fetch failed: {e}")
+                    
+                    # 진행률 업데이트
+                    self.progress_bar.setValue(int((i+1)/total * 100))
+                    QApplication.processEvents() # UI 응답성 유지
 
             self.progress_bar.setVisible(False)
             
             # 3. 그룹핑 로직
+            # [디버깅] 발견된 확장소재 타입 로깅
+            seen_types = set()
+            
             groups = {}
             for ext in raw_exts:
+                t = ext['type']
+                if t not in seen_types:
+                    # [DEBUG] 처음 보는 타입이면 샘플 데이터 출력
+                    print(f"[DEBUG_EXT] Type Found: {t}, ID: {ext.get('adExtensionId')}", flush=True)
+                    # VIEW 타입 등은 헤드라인 관련 이슈가 있을 수 있어 구조 확인 필요
+                    if t in ['VIEW', 'BLOG', 'CAFE', 'POST', 'POWER_CONTENT']:
+                        print(f"[DEBUG_EXT_DANGER] {t} Content: {ext.get('extension')}", flush=True)
+                seen_types.add(t)
+                
                 content_key = json.dumps(ext.get('extension') or {}, sort_keys=True)
                 channel_id = ext.get('pcChannelId') or ext.get('mobileChannelId') or ''
-                unique_key = f"{ext['type']}|{content_key}|{channel_id}"
+                unique_key = f"{t}|{content_key}|{channel_id}"
                 
                 if unique_key not in groups:
                     ch_name = channel_id
@@ -280,6 +326,9 @@ class ExtensionManagerWidget(QWidget):
                 
                 groups[unique_key]['ownerIds'].append(ext['ownerId'])
                 groups[unique_key]['items'].append(ext)
+            
+            self.progress_bar.setVisible(False)
+            print(f"[DEBUG] Found Extension Types in Campaign {camp_id}: {seen_types}")
             
             self.grouped_extensions = list(groups.values())
             self.render_list()
@@ -319,25 +368,38 @@ class ExtensionManagerWidget(QWidget):
 
     def run_bulk_copy(self, target_group_ids, ext_data):
         success_cnt = 0
+        fail_cnt = 0
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         total = len(target_group_ids)
         
         for i, gid in enumerate(target_group_ids):
             try:
-                api.create_extension(
+                # [속도 조절] 네이버 API 1010/1014 에러 방지 (1.0초 대기)
+                time.sleep(1.0)
+                
+                res = api.create_extension(
                     owner_id=gid,
                     type_str=ext_data['type'],
                     content_dict=ext_data['content'],
                     channel_id=ext_data['businessChannelId']
                 )
-                success_cnt += 1
+                
+                # [응답 검증] adExtensionId가 있어야 성공
+                if isinstance(res, dict) and 'adExtensionId' in res:
+                    success_cnt += 1
+                else:
+                    # 실패 로그 출력 (에러 메시지 확인용)
+                    print(f"[EXT_COPY_FAIL] Type:{ext_data['type']} Group:{gid} Res:{res}", flush=True)
+                    fail_cnt += 1
+
             except Exception as e:
-                print(f"복사 실패 ({gid}): {e}")
+                print(f"[EXT_COPY_ERR] Group:{gid} Type:{ext_data['type']} Exception:{e}", flush=True)
+                fail_cnt += 1
             
             self.progress_bar.setValue(int((i+1)/total * 100))
             QApplication.processEvents()
                 
         self.progress_bar.setVisible(False)
-        QMessageBox.information(self, "완료", f"총 {success_cnt}개 그룹에 복사되었습니다.\n(새로고침을 눌러 확인하세요)")
+        QMessageBox.information(self, "완료", f"작업이 완료되었습니다.\n성공: {success_cnt}건\n실패: {fail_cnt}건\n(실패 사유는 로그를 확인하세요)")
         self.on_campaign_changed()
