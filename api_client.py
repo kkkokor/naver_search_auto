@@ -173,8 +173,12 @@ class APIClient:
         body = [{"nccKeywordId": keyword_id, "nccAdgroupId": adgroup_id, "bidAmt": bid_amt, "useGroupBidAmt": False}]
         return self.call_naver("/ncc/keywords", method="PUT", params={"fields": "bidAmt"}, body=body)
     
-    # [NEW] 대량 입찰가 수정 (속도 향상)
+    # [수정] 대량 입찰가 수정 - useGroupBidAmt: False 추가
     def update_keywords_bulk(self, update_list):
+        # 각 항목에 useGroupBidAmt: False 추가 (3916 에러 방지)
+        for item in update_list:
+            if 'useGroupBidAmt' not in item:
+                item['useGroupBidAmt'] = False
         return self.call_naver("/ncc/keywords", method="PUT", params={"fields": "bidAmt"}, body=update_list)
 
     def get_stats(self, id_list, since=None, until=None):

@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QTreeWidget, QTreeWidgetItem, QGroupBox, QFormLayout, 
     QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QMessageBox, QSplitter, QProgressBar
+    QHeaderView, QMessageBox, QSplitter, QProgressBar, QDoubleSpinBox, QComboBox
 )
 from PyQt6.QtWidgets import QTreeWidgetItemIterator
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -195,6 +195,97 @@ class BidWorker(QThread):
         self.is_running = False
 
 # -------------------------------------------------------------------------
+# [일괄 입찰가 워커] 모든 키워드를 동일 금액으로 설정
+# -------------------------------------------------------------------------
+class BulkBidFixWorker(QThread):
+    log_signal = pyqtSignal(dict)
+    status_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, int)  # (current, total)
+    finished_signal = pyqtSignal()
+
+    def __init__(self, campaign_id, fixed_bid_amt):
+        super().__init__()
+        self.campaign_id = campaign_id
+        self.fixed_bid_amt = fixed_bid_amt
+        self.is_running = True
+
+    def run(self):
+        try:
+            self.status_signal.emit("캠페인 그룹 조회 중...")
+            
+            # 1. 캠페인의 모든 그룹 조회
+            groups = api.get_adgroups(self.campaign_id)
+            if not groups:
+                self.status_signal.emit("그룹이 없습니다.")
+                self.finished_signal.emit()
+                return
+            
+            total_keywords = 0
+            processed = 0
+            all_updates = []
+            
+            # 2. 각 그룹의 모든 키워드 조회
+            for g in groups:
+                if not self.is_running: break
+                
+                gid = g['nccAdgroupId']
+                gname = g['name']
+                keywords = api.get_keywords(gid)
+                
+                if keywords:
+                    for k in keywords:
+                        if k['status'] in ['ELIGIBLE', 'ON']:
+                            kid = k['nccKeywordId']
+                            old_bid = k['bidAmt']
+                            
+                            # 기존 금액과 다를 때만 업데이트 추가
+                            if old_bid != self.fixed_bid_amt:
+                                all_updates.append({
+                                    'nccKeywordId': kid,
+                                    'nccAdgroupId': gid,
+                                    'bidAmt': self.fixed_bid_amt
+                                })
+                                
+                                # 로그 출력
+                                self.log_signal.emit({
+                                    'time': datetime.now().strftime("%H:%M:%S"),
+                                    'group': gname,
+                                    'keyword': k['keyword'],
+                                    'old': old_bid,
+                                    'new': self.fixed_bid_amt,
+                                    'reason': f'일괄 설정'
+                                })
+                            
+                            total_keywords += 1
+                            processed += 1
+                            self.progress_signal.emit(processed, len(groups))
+                
+                time.sleep(0.2)  # 속도 제한
+            
+            # 3. 일괄 업데이트
+            if all_updates:
+                self.status_signal.emit(f"업데이트 중... ({len(all_updates)}개 키워드)")
+                
+                # 100개씩 묶어서 업데이트
+                for i in range(0, len(all_updates), 100):
+                    if not self.is_running: break
+                    chunk = all_updates[i:i+100]
+                    api.update_keywords_bulk(chunk)
+                    time.sleep(0.5)  # 요청 간격
+                
+                self.status_signal.emit(f"완료! 총 {len(all_updates)}개 키워드 업데이트")
+            else:
+                self.status_signal.emit("변경할 키워드가 없습니다.")
+            
+            self.finished_signal.emit()
+        except Exception as e:
+            self.status_signal.emit(f"오류: {str(e)}")
+            self.finished_signal.emit()
+
+    def stop(self):
+        self.is_running = False
+
+# -------------------------------------------------------------------------
 # [메인 UI]
 # -------------------------------------------------------------------------
 class AutoBidderWidget(QWidget):
@@ -257,6 +348,25 @@ class AutoBidderWidget(QWidget):
         btn_del.clicked.connect(self.remove_rows)
         right_layout.addWidget(btn_del)
         
+        # [새로운 기능] 일괄 입찰가 설정
+        grp_bulk_fix = QGroupBox("4. 일괄 입찰가 설정 (모든 키워드)")
+        bulk_layout = QHBoxLayout(grp_bulk_fix)
+        self.combo_camp_bulk = QComboBox()
+        self.combo_camp_bulk.addItem("캠페인 선택")
+        self.sb_bulk_bid = QSpinBox()
+        self.sb_bulk_bid.setRange(70, 300000)
+        self.sb_bulk_bid.setSingleStep(1000)
+        self.sb_bulk_bid.setValue(500)
+        self.sb_bulk_bid.setPrefix("입찰가: ")
+        self.btn_bulk_fix = QPushButton("✓ 일괄 설정 실행")
+        self.btn_bulk_fix.setStyleSheet("background-color: #ff9800; color: white; font-weight: bold;")
+        self.btn_bulk_fix.clicked.connect(self.start_bulk_bid_fix)
+        bulk_layout.addWidget(QLabel("대상:"))
+        bulk_layout.addWidget(self.combo_camp_bulk)
+        bulk_layout.addWidget(self.sb_bulk_bid)
+        bulk_layout.addWidget(self.btn_bulk_fix)
+        right_layout.addWidget(grp_bulk_fix)
+        
         hbox_exec = QHBoxLayout()
         self.chk_loop = QCheckBox("무한반복"); self.chk_loop.setChecked(True)
         self.sb_interval = QSpinBox(); self.sb_interval.setValue(10); self.sb_interval.setSuffix("분")
@@ -295,12 +405,19 @@ class AutoBidderWidget(QWidget):
     def on_loaded(self, data):
         self.lbl_status.setText(f"로딩 완료. (캠페인 {len(data)}개)")
         if not data: return
+        
+        # 콤보박스에 캠페인 추가
+        self.combo_camp_bulk.clear()
+        self.combo_camp_bulk.addItem("캠페인 선택", "")
+        
         for c in data:
             c_item = QTreeWidgetItem(self.tree)
             c_item.setText(0, c['name'])
             c_item.setFlags(c_item.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
             c_item.setCheckState(0, Qt.CheckState.Unchecked)
             c_item.setExpanded(True)
+            # 콤보박스에 캠페인 ID 추가
+            self.combo_camp_bulk.addItem(c['name'], c['id'])
             for g in c['groups']:
                 g_item = QTreeWidgetItem(c_item)
                 g_item.setText(0, g['name'])
@@ -412,3 +529,29 @@ class AutoBidderWidget(QWidget):
         self.table_log.setItem(r, 5, QTableWidgetItem(data['reason']))
         self.table_log.scrollToBottom()
         if r > 1000: self.table_log.removeRow(0)
+
+    def start_bulk_bid_fix(self):
+        """일괄 입찰가 설정 시작"""
+        camp_id = self.combo_camp_bulk.currentData()
+        if not camp_id or camp_id == "":
+            QMessageBox.warning(self, "경고", "캠페인을 선택해주세요.")
+            return
+        
+        bid_amt = self.sb_bulk_bid.value()
+        if bid_amt < 70 or bid_amt > 300000:
+            QMessageBox.warning(self, "경고", "입찰가는 70~300,000 사이여야 합니다.")
+            return
+        
+        if QMessageBox.question(self, "확인", 
+                                f"캠페인의 모든 키워드 입찰가를 {bid_amt}원으로 설정하시겠습니까?") != QMessageBox.StandardButton.Yes:
+            return
+        
+        # 워커 실행
+        self.bulk_bid_worker = BulkBidFixWorker(camp_id, bid_amt)
+        self.bulk_bid_worker.log_signal.connect(self.add_log)
+        self.bulk_bid_worker.status_signal.connect(self.lbl_status.setText)
+        self.bulk_bid_worker.finished_signal.connect(lambda: self.btn_bulk_fix.setEnabled(True))
+        self.bulk_bid_worker.start()
+        
+        self.btn_bulk_fix.setEnabled(False)
+        self.lbl_status.setText("일괄 입찰가 설정 중...")

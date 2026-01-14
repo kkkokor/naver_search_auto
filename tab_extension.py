@@ -111,29 +111,46 @@ class ExtensionGroupCard(QFrame):
         data = self.data['content']
         ext_type = self.data['type']
         
-        # [디버깅] 실제 데이터 구조 확인용
-        # layout.addWidget(QLabel(f"Type: {ext_type}"))
-        # layout.addWidget(QLabel(f"Raw: {str(data)}"))
+        # [수정] HEADLINE, DESCRIPTION 우선 처리
+        if ext_type == 'HEADLINE':
+            hl = data.get('headline', '제목 없음')
+            layout.addWidget(QLabel(f"📝 헤드라인: {hl}"))
+            if self.data.get('businessChannelId'):
+                layout.addWidget(QLabel(f"🏢 비즈채널: {self.data.get('channelName', '-')}"))
+            return
+            
+        elif ext_type == 'DESCRIPTION':
+            desc = data.get('description', '설명 없음')
+            layout.addWidget(QLabel(f"📄 설명: {desc}"))
+            if self.data.get('businessChannelId'):
+                layout.addWidget(QLabel(f"🏢 비즈채널: {self.data.get('channelName', '-')}"))
+            return
 
         if self.data.get('businessChannelId'):
             layout.addWidget(QLabel(f"🏢 비즈채널: {self.data.get('channelName') or self.data.get('businessChannelId')}"))
             if ext_type == 'WEBSITE_INFO':
                 layout.addWidget(QLabel(f"🔗 URL: {self.data.get('channelUrl', '-') }"))
+                return
                 
-            # [수정] PHONE 타입이라도 실제 phoneNumber는 extension 딕셔너리 안에 있음
+            # [수정] PHONE 타입이라도 실제 phoneNumber는 adExtension 딕셔너리 안에 있음
             if ext_type == 'PHONE':
                 ph = data.get('phoneNumber') or "번호 없음 (채널 정보만 있음)"
                 layout.addWidget(QLabel(f"📞 전화번호: {ph}"))
+                return
         
         elif ext_type == 'PHONE':
             # 채널 ID가 없을 수도 있음 (순수 텍스트?) -> PHONE은 채널 필수임
             layout.addWidget(QLabel(f"📞 전화번호: {data.get('phoneNumber', '번호 없음')}"))
             
         elif ext_type == 'SUB_LINKS':
-            layout.addWidget(QLabel(f"🔗 서브링크 ({len(data.get('links', []))}개)"))
-            for link in data.get('links', [])[:5]:
-                # linkName이 네이버 API 표준임
-                layout.addWidget(QLabel(f" - {link.get('linkName', '제목없음')}: {link.get('subLink', '')}"))
+            # [수정] GET 응답에서 adExtension이 배열로 올 수 있음
+            links = data if isinstance(data, list) else data.get('links', [])
+            layout.addWidget(QLabel(f"🔗 서브링크 ({len(links)}개)"))
+            for link in links[:5]:
+                # 'name'과 'final' 또는 'linkName'과 'subLink'
+                name = link.get('name') or link.get('linkName', '제목없음')
+                url = link.get('final') or link.get('subLink', '')
+                layout.addWidget(QLabel(f" - {name}: {url}"))
                 
         elif ext_type in ['POWER_LINK_IMAGE', 'IMAGE_SUB_LINKS']:
             layout.addWidget(QLabel("🖼️ 이미지 확장소재"))
@@ -296,12 +313,14 @@ class ExtensionManagerWidget(QWidget):
                 if t not in seen_types:
                     # [DEBUG] 처음 보는 타입이면 샘플 데이터 출력
                     print(f"[DEBUG_EXT] Type Found: {t}, ID: {ext.get('adExtensionId')}", flush=True)
-                    # VIEW 타입 등은 헤드라인 관련 이슈가 있을 수 있어 구조 확인 필요
-                    if t in ['VIEW', 'BLOG', 'CAFE', 'POST', 'POWER_CONTENT']:
-                        print(f"[DEBUG_EXT_DANGER] {t} Content: {ext.get('extension')}", flush=True)
+                    # HEADLINE, DESCRIPTION 등 문제 타입 상세 출력
+                    if t in ['HEADLINE', 'DESCRIPTION', 'VIEW', 'BLOG', 'CAFE', 'POST', 'POWER_CONTENT']:
+                        print(f"[DEBUG_EXT_CONTENT] {t} -> extension: {ext.get('extension')}", flush=True)
+                        print(f"[DEBUG_EXT_FULL] {t} -> full data: {json.dumps(ext, ensure_ascii=False)}", flush=True)
                 seen_types.add(t)
                 
-                content_key = json.dumps(ext.get('extension') or {}, sort_keys=True)
+                # [수정] GET 응답에서는 'adExtension' 필드에 실제 데이터가 들어있음 ('extension' 아님)
+                content_key = json.dumps(ext.get('adExtension') or {}, sort_keys=True)
                 channel_id = ext.get('pcChannelId') or ext.get('mobileChannelId') or ''
                 unique_key = f"{t}|{content_key}|{channel_id}"
                 
@@ -316,7 +335,7 @@ class ExtensionManagerWidget(QWidget):
 
                     groups[unique_key] = {
                         'type': ext['type'],
-                        'content': ext.get('extension') or {},
+                        'content': ext.get('adExtension') or {},
                         'businessChannelId': channel_id,
                         'channelName': ch_name,
                         'channelUrl': ch_url,
@@ -385,12 +404,17 @@ class ExtensionManagerWidget(QWidget):
                     channel_id=ext_data['businessChannelId']
                 )
                 
-                # [응답 검증] adExtensionId가 있어야 성공
-                if isinstance(res, dict) and 'adExtensionId' in res:
+                # [수정] 응답 검증 - 'nccAdExtensionId'가 있어야 성공
+                if isinstance(res, dict) and 'nccAdExtensionId' in res:
                     success_cnt += 1
-                else:
-                    # 실패 로그 출력 (에러 메시지 확인용)
+                elif isinstance(res, dict) and res.get('error'):
+                    # 실제 에러인 경우만 로그 출력
                     print(f"[EXT_COPY_FAIL] Type:{ext_data['type']} Group:{gid} Res:{res}", flush=True)
+                    fail_cnt += 1
+                else:
+                    # 성공이지만 예상치 못한 응답 구조
+                    print(f"[EXT_COPY_WARN] Type:{ext_data['type']} Group:{gid} Unexpected Res:{res}", flush=True)
+                    success_cnt += 1
                     fail_cnt += 1
 
             except Exception as e:
