@@ -91,16 +91,86 @@ class ExtensionGroupCard(QFrame):
         status_lbl.setStyleSheet(f"color: {usage_color}; font-weight: bold; font-size: 12px;")
         header.addWidget(status_lbl)
         header.addStretch()
+
+        # 전체 끄기/켜기 버튼
+        btn_toggle_all = QPushButton("⏸ 전체끄기")
+        btn_toggle_all.setStyleSheet("background-color: #fd7e14; color: white; font-weight: bold; padding: 3px 10px; font-size: 11px;")
+        btn_toggle_all.setFixedHeight(28)
+        btn_toggle_all.clicked.connect(lambda: self.toggle_all_items(True))
+        header.addWidget(btn_toggle_all)
+
+        btn_enable_all = QPushButton("▶ 전체켜기")
+        btn_enable_all.setStyleSheet("background-color: #20c997; color: white; font-weight: bold; padding: 3px 10px; font-size: 11px;")
+        btn_enable_all.setFixedHeight(28)
+        btn_enable_all.clicked.connect(lambda: self.toggle_all_items(False))
+        header.addWidget(btn_enable_all)
+
+        # 전체 삭제 버튼
+        btn_delete_all = QPushButton("🗑 전체삭제")
+        btn_delete_all.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; padding: 3px 10px; font-size: 11px;")
+        btn_delete_all.setFixedHeight(28)
+        btn_delete_all.clicked.connect(self.delete_all_items)
+        header.addWidget(btn_delete_all)
+
         layout.addLayout(header)
-        
+
         # 2. 본문 미리보기
         content_frame = QFrame()
         content_frame.setStyleSheet("background-color: #f8f9fa; border-radius: 5px; padding: 10px;")
         c_layout = QVBoxLayout(content_frame)
         self.render_preview(c_layout)
         layout.addWidget(content_frame)
-        
-        # 3. 배포 관리
+
+        # 3. 적용 관리 (사용 중인 그룹)
+        used_groups = [g for g in self.all_groups if g['nccAdgroupId'] in self.used_group_ids]
+        if used_groups:
+            mgmt_box = QGroupBox(f"적용 관리 (사용 중 그룹 {len(used_groups)}개)")
+            mgmt_box.setStyleSheet("QGroupBox { font-weight: bold; color: #666; border: 1px solid #eee; margin-top: 10px; }")
+            mgmt_layout = QVBoxLayout(mgmt_box)
+
+            mgmt_scroll = QScrollArea()
+            mgmt_scroll.setFixedHeight(100)
+            mgmt_scroll.setWidgetResizable(True)
+            mgmt_scroll.setStyleSheet("border: none;")
+
+            mgmt_chk_widget = QWidget()
+            mgmt_chk_layout = QVBoxLayout(mgmt_chk_widget)
+            mgmt_chk_layout.setContentsMargins(0,0,0,0)
+
+            self.mgmt_check_all = QCheckBox("전체 선택")
+            self.mgmt_check_all.clicked.connect(self.toggle_mgmt_all)
+            mgmt_chk_layout.addWidget(self.mgmt_check_all)
+
+            self.mgmt_check_boxes = []
+            for grp in used_groups:
+                chk = QCheckBox(grp['name'])
+                chk.setProperty('groupId', grp['nccAdgroupId'])
+                self.mgmt_check_boxes.append(chk)
+                mgmt_chk_layout.addWidget(chk)
+
+            mgmt_scroll.setWidget(mgmt_chk_widget)
+            mgmt_layout.addWidget(mgmt_scroll)
+
+            btn_row = QHBoxLayout()
+            btn_sel_toggle = QPushButton("⏸ 선택 끄기")
+            btn_sel_toggle.setStyleSheet("background-color: #fd7e14; color: white; font-weight: bold;")
+            btn_sel_toggle.clicked.connect(lambda: self.toggle_selected_items(True))
+            btn_row.addWidget(btn_sel_toggle)
+
+            btn_sel_enable = QPushButton("▶ 선택 켜기")
+            btn_sel_enable.setStyleSheet("background-color: #20c997; color: white; font-weight: bold;")
+            btn_sel_enable.clicked.connect(lambda: self.toggle_selected_items(False))
+            btn_row.addWidget(btn_sel_enable)
+
+            btn_sel_delete = QPushButton("🗑 선택 삭제")
+            btn_sel_delete.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+            btn_sel_delete.clicked.connect(self.delete_selected_items)
+            btn_row.addWidget(btn_sel_delete)
+
+            mgmt_layout.addLayout(btn_row)
+            layout.addWidget(mgmt_box)
+
+        # 4. 배포 관리
         if self.unused_groups:
             exp_box = QGroupBox(f"배포 관리 (미사용 그룹 {len(self.unused_groups)}개)")
             exp_box.setStyleSheet("QGroupBox { font-weight: bold; color: #666; border: 1px solid #eee; margin-top: 10px; }")
@@ -261,6 +331,54 @@ class ExtensionGroupCard(QFrame):
         for chk in self.check_boxes:
             chk.setChecked(state)
 
+    def toggle_mgmt_all(self):
+        state = self.mgmt_check_all.isChecked()
+        for chk in self.mgmt_check_boxes:
+            chk.setChecked(state)
+
+    def _get_ext_ids_for_groups(self, group_ids):
+        """특정 그룹들에 해당하는 nccAdExtensionId 리스트 반환"""
+        gid_set = set(group_ids)
+        return [item['nccAdExtensionId'] for item in self.data['items'] if item['ownerId'] in gid_set]
+
+    def delete_all_items(self):
+        ext_ids = [item['nccAdExtensionId'] for item in self.data['items']]
+        if not ext_ids:
+            return
+        if QMessageBox.question(self, "확인", f"이 확장소재를 모든 그룹({len(ext_ids)}건)에서 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.parent_widget.run_bulk_delete(ext_ids)
+
+    def toggle_all_items(self, user_lock):
+        ext_ids = [item['nccAdExtensionId'] for item in self.data['items']]
+        if not ext_ids:
+            return
+        action = "끄기" if user_lock else "켜기"
+        if QMessageBox.question(self, "확인", f"이 확장소재를 모든 그룹({len(ext_ids)}건) {action} 하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.parent_widget.run_bulk_toggle(ext_ids, user_lock)
+
+    def delete_selected_items(self):
+        if not hasattr(self, 'mgmt_check_boxes'):
+            return
+        selected_gids = [chk.property('groupId') for chk in self.mgmt_check_boxes if chk.isChecked()]
+        if not selected_gids:
+            QMessageBox.warning(self, "경고", "삭제할 그룹을 선택해주세요.")
+            return
+        ext_ids = self._get_ext_ids_for_groups(selected_gids)
+        if ext_ids and QMessageBox.question(self, "확인", f"선택한 {len(ext_ids)}건을 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.parent_widget.run_bulk_delete(ext_ids)
+
+    def toggle_selected_items(self, user_lock):
+        if not hasattr(self, 'mgmt_check_boxes'):
+            return
+        selected_gids = [chk.property('groupId') for chk in self.mgmt_check_boxes if chk.isChecked()]
+        if not selected_gids:
+            QMessageBox.warning(self, "경고", "대상 그룹을 선택해주세요.")
+            return
+        ext_ids = self._get_ext_ids_for_groups(selected_gids)
+        action = "끄기" if user_lock else "켜기"
+        if ext_ids and QMessageBox.question(self, "확인", f"선택한 {len(ext_ids)}건을 {action} 하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            self.parent_widget.run_bulk_toggle(ext_ids, user_lock)
+
     def copy_extension(self):
         targets = [chk.property('groupId') for chk in self.check_boxes if chk.isChecked()]
         if not targets:
@@ -404,7 +522,7 @@ class ExtensionManagerWidget(QWidget):
                 t = ext['type']
                 if t not in seen_types:
                     # [DEBUG] 처음 보는 타입이면 샘플 데이터 출력
-                    print(f"[DEBUG_EXT] Type Found: {t}, ID: {ext.get('adExtensionId')}", flush=True)
+                    print(f"[DEBUG_EXT] Type Found: {t}, ID: {ext.get('nccAdExtensionId')}", flush=True)
                     # HEADLINE, DESCRIPTION 등 문제 타입 상세 출력
                 if t in ['HEADLINE', 'DESCRIPTION', 'VIEW', 'BLOG', 'CAFE', 'POST', 'POWER_CONTENT', 'POWER_LINK_IMAGE', 'IMAGE_SUB_LINKS']:
                     print(f"[DEBUG_EXT_CONTENT] {t} -> extension: {ext.get('extension')} / adExtension: {ext.get('adExtension')}", flush=True)
@@ -521,6 +639,61 @@ class ExtensionManagerWidget(QWidget):
                 
         self.progress_bar.setVisible(False)
         QMessageBox.information(self, "완료", f"작업이 완료되었습니다.\n성공: {success_cnt}건\n실패: {fail_cnt}건\n(실패 사유는 로그를 확인하세요)")
+        self.on_campaign_changed()
+
+    def run_bulk_delete(self, ext_ids):
+        success_cnt = 0
+        fail_cnt = 0
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        total = len(ext_ids)
+
+        for i, eid in enumerate(ext_ids):
+            try:
+                time.sleep(1.0)
+                res = api.delete_extension(eid)
+                if res is not None and not (isinstance(res, dict) and res.get('error')):
+                    success_cnt += 1
+                else:
+                    print(f"[EXT_DEL_FAIL] ID:{eid} Res:{res}", flush=True)
+                    fail_cnt += 1
+            except Exception as e:
+                print(f"[EXT_DEL_ERR] ID:{eid} Exception:{e}", flush=True)
+                fail_cnt += 1
+
+            self.progress_bar.setValue(int((i+1)/total * 100))
+            QApplication.processEvents()
+
+        self.progress_bar.setVisible(False)
+        QMessageBox.information(self, "삭제 완료", f"삭제 완료\n성공: {success_cnt}건\n실패: {fail_cnt}건")
+        self.on_campaign_changed()
+
+    def run_bulk_toggle(self, ext_ids, user_lock):
+        action = "끄기" if user_lock else "켜기"
+        success_cnt = 0
+        fail_cnt = 0
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        total = len(ext_ids)
+
+        for i, eid in enumerate(ext_ids):
+            try:
+                time.sleep(1.0)
+                res = api.toggle_extension(eid, user_lock)
+                if res is not None and not (isinstance(res, dict) and res.get('error')):
+                    success_cnt += 1
+                else:
+                    print(f"[EXT_TOGGLE_FAIL] ID:{eid} Lock:{user_lock} Res:{res}", flush=True)
+                    fail_cnt += 1
+            except Exception as e:
+                print(f"[EXT_TOGGLE_ERR] ID:{eid} Exception:{e}", flush=True)
+                fail_cnt += 1
+
+            self.progress_bar.setValue(int((i+1)/total * 100))
+            QApplication.processEvents()
+
+        self.progress_bar.setVisible(False)
+        QMessageBox.information(self, f"{action} 완료", f"{action} 완료\n성공: {success_cnt}건\n실패: {fail_cnt}건")
         self.on_campaign_changed()
 
     def on_bulk_register_multi_clicked(self):

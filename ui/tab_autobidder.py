@@ -355,6 +355,14 @@ class BidWorker(QThread):
 
         # ━━━ [Rule 1] Estimate 가격 (최우선) ━━━
         if estimated_bid:
+            # 순위가 목표보다 낮거나 노출 부족 → estimate와 단위인상 중 큰 값 적용
+            if cur_rank > target or (cur_rank > 0 and imp_cnt < min_imp):
+                new_bid = max(estimated_bid, cur_bid + step)
+                new_bid = min(new_bid, max_b)
+                if new_bid == cur_bid:
+                    return cur_bid, f"✓유지(Est={estimated_bid},{int(cur_rank)}위)"
+                return new_bid, f"📊Est+인상({cur_bid}→{new_bid},Est={estimated_bid})"
+
             new_bid = min(estimated_bid, max_b)
             if new_bid == cur_bid:
                 return cur_bid, f"✓유지(Est={estimated_bid})"

@@ -99,8 +99,8 @@ class APIClient:
             elif method == "DELETE": resp = requests.delete(url, headers=headers, params=params)
             else: return None
 
-            if resp.status_code == 200:
-                return resp.json()
+            if resp.status_code in (200, 204):
+                return resp.json() if resp.text else {"success": True}
             else:
                 self.log("NAVER_ERR", f"실패({resp.status_code}): {resp.text}")
                 try:
@@ -358,6 +358,16 @@ class APIClient:
 
         # [수정] 단일 객체 전송으로 복구 (API가 Array를 받지 않음)
         return self.call_naver("/ncc/ad-extensions", method="POST", body=body)
+
+    def delete_extension(self, ext_id):
+        return self.call_naver(f"/ncc/ad-extensions/{ext_id}", method="DELETE")
+
+    def toggle_extension(self, ext_id, user_lock):
+        return self.call_naver(
+            f"/ncc/ad-extensions/{ext_id}", method="PUT",
+            params={'fields': 'userLock'},
+            body={'userLock': user_lock}
+        )
 
     def get_biz_channels(self):
         return self.call_naver("/ncc/channels") or []
