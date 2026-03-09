@@ -166,8 +166,13 @@ class APIClient:
         stats_map = {}
         for i in range(0, len(id_list), 50):
             chunk = id_list[i:i+50]
-            ids_str = ",".join(chunk)
-            res = self.call_naver("/stats", params={"ids": ids_str, "fields": '["impCnt","clkCnt","salesAmt","avgRnk","ccnt"]', "timeRange": json.dumps(time_range)})
+            fields = '["impCnt","clkCnt","salesAmt","avgRnk","ccnt"]'
+            res = self.call_naver("/stats", params={
+                "ids": chunk,
+                "fields": fields,
+                "timeRange": json.dumps(time_range),
+                "timeIncrement": "allDays"
+            })
             if res and isinstance(res, dict) and 'data' in res:
                 for item in res['data']: stats_map[item['id']] = item
             time.sleep(0.05)
